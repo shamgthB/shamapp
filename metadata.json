@@ -1,0 +1,6 @@
+{
+  "name": "PulseChat",
+  "description": "Real-time messaging app with direct messaging, channels, rich status, and media sharing",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

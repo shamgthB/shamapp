@@ -1,0 +1,211 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny all access
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidUserProfile(data) {
+      return data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
+             data.email is string && data.email.size() >= 3 && data.email.size() <= 100 &&
+             (!('photoUrl' in data) || data.photoUrl == null || (data.photoUrl is string && data.photoUrl.size() <= 500)) &&
+             (!('status' in data) || data.status == null || (data.status is string && data.status.size() <= 50)) &&
+             (!('about' in data) || data.about == null || (data.about is string && data.about.size() <= 250));
+    }
+
+    function isValidChannel(data) {
+      return data.channelId is string && isValidId(data.channelId) &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 50 &&
+             data.description is string && data.description.size() >= 1 && data.description.size() <= 250 &&
+             data.createdBy is string && data.createdBy.size() > 0 && data.createdBy.size() <= 128 &&
+             (!('memberCount' in data) || data.memberCount is int);
+    }
+
+    function isValidChannelMessage(data) {
+      return data.messageId is string && isValidId(data.messageId) &&
+             data.channelId is string && isValidId(data.channelId) &&
+             data.senderId is string && data.senderId.size() > 0 && data.senderId.size() <= 128 &&
+             data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 60 &&
+             (!('senderPhotoUrl' in data) || data.senderPhotoUrl == null || (data.senderPhotoUrl is string && data.senderPhotoUrl.size() <= 500)) &&
+             data.text is string && data.text.size() >= 1 && data.text.size() <= 1000;
+    }
+
+    function isValidConversation(data) {
+      return data.conversationId is string && isValidId(data.conversationId) &&
+             data.participantUids is list && data.participantUids.size() == 2 &&
+             (data.participantUids.size() == 0 || data.participantUids[0] is string) &&
+             (!('lastMessage' in data) || (data.lastMessage is string && data.lastMessage.size() <= 500)) &&
+             (!('lastMessageSenderId' in data) || (data.lastMessageSenderId is string && data.lastMessageSenderId.size() <= 128)) &&
+             (!('lastMessageAt' in data) || (data.lastMessageAt is timestamp && data.lastMessageAt <= request.time));
+    }
+
+    function isValidConversationMessage(data) {
+      return data.messageId is string && isValidId(data.messageId) &&
+             data.conversationId is string && isValidId(data.conversationId) &&
+             data.senderId is string && data.senderId.size() > 0 && data.senderId.size() <= 128 &&
+             data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 60 &&
+             data.text is string && data.text.size() >= 1 && data.text.size() <= 1000 &&
+             data.participantUids is list && data.participantUids.size() == 2 &&
+             (data.participantUids.size() == 0 || data.participantUids[0] is string);
+    }
+
+    // --- USERS DIRECTORY ---
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId);
+      allow list: if isSignedIn();
+
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'email', 'createdAt']) &&
+                       incoming().keys().hasOnly(['userId', 'displayName', 'email', 'photoUrl', 'status', 'about', 'createdAt', 'updatedAt']) &&
+                       incoming().createdAt is timestamp &&
+                       incoming().createdAt <= request.time &&
+                       isValidUserProfile(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoUrl', 'status', 'about', 'updatedAt']) &&
+                       (!('updatedAt' in incoming()) || (incoming().updatedAt is timestamp && incoming().updatedAt <= request.time)) &&
+                       isValidUserProfile(incoming());
+
+      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+    }
+
+    // --- CHANNELS ---
+    match /channels/{channelId} {
+      allow get: if isSignedIn() && isValidId(channelId);
+      allow list: if isSignedIn();
+
+      allow create: if isSignedIn() &&
+                       isValidId(channelId) &&
+                       incoming().channelId == channelId &&
+                       incoming().createdBy == request.auth.uid &&
+                       incoming().keys().hasAll(['channelId', 'name', 'description', 'createdBy', 'createdAt']) &&
+                       incoming().keys().hasOnly(['channelId', 'name', 'description', 'createdBy', 'createdAt', 'memberCount']) &&
+                       incoming().createdAt is timestamp &&
+                       incoming().createdAt <= request.time &&
+                       isValidChannel(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(channelId) &&
+                       incoming().channelId == existing().channelId &&
+                       incoming().createdBy == existing().createdBy &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'memberCount']) &&
+                       isValidChannel(incoming());
+
+      allow delete: if false;
+
+      // Messages inside channel
+      match /messages/{messageId} {
+        allow get: if isSignedIn() && isValidId(channelId) && isValidId(messageId) && resource.data.channelId == channelId;
+        allow list: if isSignedIn() && isValidId(channelId);
+
+        allow create: if isSignedIn() &&
+                         isValidId(channelId) &&
+                         isValidId(messageId) &&
+                         incoming().messageId == messageId &&
+                         incoming().channelId == channelId &&
+                         incoming().senderId == request.auth.uid &&
+                         incoming().keys().hasAll(['messageId', 'channelId', 'senderId', 'senderName', 'text', 'createdAt']) &&
+                         incoming().keys().hasOnly(['messageId', 'channelId', 'senderId', 'senderName', 'senderPhotoUrl', 'text', 'createdAt']) &&
+                         incoming().createdAt is timestamp &&
+                         incoming().createdAt <= request.time &&
+                         isValidChannelMessage(incoming());
+
+        allow delete: if isSignedIn() &&
+                         isValidId(channelId) &&
+                         isValidId(messageId) &&
+                         resource.data.senderId == request.auth.uid;
+
+        allow update: if false;
+      }
+    }
+
+    // --- DIRECT CONVERSATIONS ---
+    match /conversations/{conversationId} {
+      allow get: if isSignedIn() && isValidId(conversationId) && request.auth.uid in resource.data.participantUids;
+      allow list: if isSignedIn() && request.auth.uid in resource.data.participantUids;
+
+      allow create: if isSignedIn() &&
+                       isValidId(conversationId) &&
+                       incoming().conversationId == conversationId &&
+                       request.auth.uid in incoming().participantUids &&
+                       incoming().participantUids.size() == 2 &&
+                       incoming().keys().hasAll(['conversationId', 'participantUids', 'createdAt']) &&
+                       incoming().keys().hasOnly(['conversationId', 'participantUids', 'lastMessage', 'lastMessageSenderId', 'lastMessageAt', 'createdAt']) &&
+                       incoming().createdAt is timestamp &&
+                       incoming().createdAt <= request.time &&
+                       isValidConversation(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(conversationId) &&
+                       request.auth.uid in existing().participantUids &&
+                       incoming().conversationId == existing().conversationId &&
+                       incoming().participantUids == existing().participantUids &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['lastMessage', 'lastMessageSenderId', 'lastMessageAt']) &&
+                       isValidConversation(incoming());
+
+      allow delete: if false;
+
+      // Messages in conversation
+      match /messages/{messageId} {
+        allow get: if isSignedIn() &&
+                      isValidId(conversationId) &&
+                      isValidId(messageId) &&
+                      request.auth.uid in resource.data.participantUids &&
+                      resource.data.conversationId == conversationId;
+        allow list: if isSignedIn() &&
+                       isValidId(conversationId) &&
+                       request.auth.uid in resource.data.participantUids;
+
+        allow create: if isSignedIn() &&
+                         isValidId(conversationId) &&
+                         isValidId(messageId) &&
+                         incoming().messageId == messageId &&
+                         incoming().conversationId == conversationId &&
+                         incoming().senderId == request.auth.uid &&
+                         request.auth.uid in incoming().participantUids &&
+                         incoming().participantUids.size() == 2 &&
+                         incoming().keys().hasAll(['messageId', 'conversationId', 'senderId', 'senderName', 'text', 'participantUids', 'createdAt']) &&
+                         incoming().keys().hasOnly(['messageId', 'conversationId', 'senderId', 'senderName', 'text', 'participantUids', 'createdAt']) &&
+                         incoming().createdAt is timestamp &&
+                         incoming().createdAt <= request.time &&
+                         isValidConversationMessage(incoming());
+
+        allow delete: if isSignedIn() &&
+                         isValidId(conversationId) &&
+                         isValidId(messageId) &&
+                         resource.data.senderId == request.auth.uid;
+
+        allow update: if false;
+      }
+    }
+  }
+}
