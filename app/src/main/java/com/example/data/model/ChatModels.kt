@@ -3,8 +3,21 @@ package com.example.data.model
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FieldValue
 
+data class UsernameRegistration(
+    val username: String = "",
+    val userId: String = "",
+    val createdAt: Timestamp? = null
+) {
+    fun toMap(): Map<String, Any> = mapOf(
+        "username" to username,
+        "userId" to userId,
+        "createdAt" to FieldValue.serverTimestamp()
+    )
+}
+
 data class UserProfile(
     val userId: String = "",
+    val username: String = "",
     val displayName: String = "",
     val email: String = "",
     val photoUrl: String? = null,
@@ -21,6 +34,7 @@ data class UserProfile(
             "status" to status,
             "createdAt" to FieldValue.serverTimestamp()
         )
+        if (username.isNotBlank()) map["username"] = username.lowercase()
         photoUrl?.let { map["photoUrl"] = it }
         about?.let { map["about"] = it }
         return map
@@ -32,8 +46,35 @@ data class UserProfile(
             "status" to status,
             "updatedAt" to FieldValue.serverTimestamp()
         )
+        if (username.isNotBlank()) map["username"] = username.lowercase()
         photoUrl?.let { map["photoUrl"] = it }
         about?.let { map["about"] = it }
+        return map
+    }
+}
+
+data class ConnectionRequest(
+    val requestId: String = "",
+    val fromUserId: String = "",
+    val fromUserName: String = "",
+    val fromUserPhotoUrl: String? = null,
+    val toUserId: String = "",
+    val toUserName: String = "",
+    val status: String = "PENDING", // PENDING, ACCEPTED, DECLINED
+    val createdAt: Timestamp? = null,
+    val updatedAt: Timestamp? = null
+) {
+    fun toCreateMap(): Map<String, Any> {
+        val map = mutableMapOf<String, Any>(
+            "requestId" to requestId,
+            "fromUserId" to fromUserId,
+            "fromUserName" to fromUserName,
+            "toUserId" to toUserId,
+            "toUserName" to toUserName,
+            "status" to status,
+            "createdAt" to FieldValue.serverTimestamp()
+        )
+        fromUserPhotoUrl?.let { map["fromUserPhotoUrl"] = it }
         return map
     }
 }
@@ -109,12 +150,13 @@ data class ConversationMessage(
     val conversationId: String = "",
     val senderId: String = "",
     val senderName: String = "",
+    val senderPhotoUrl: String? = null,
     val text: String = "",
     val participantUids: List<String> = emptyList(),
     val createdAt: Timestamp? = null
 ) {
     fun toCreateMap(): Map<String, Any> {
-        return mapOf(
+        val map = mutableMapOf<String, Any>(
             "messageId" to messageId,
             "conversationId" to conversationId,
             "senderId" to senderId,
@@ -123,5 +165,7 @@ data class ConversationMessage(
             "participantUids" to participantUids,
             "createdAt" to FieldValue.serverTimestamp()
         )
+        senderPhotoUrl?.let { map["senderPhotoUrl"] = it }
+        return map
     }
 }

@@ -2,23 +2,27 @@ package com.example.data.repository
 
 import android.content.Context
 import com.example.R
-import com.example.data.model.Channel
-import com.example.data.model.ChannelMessage
+import com.example.data.model.ConnectionRequest
 import com.example.data.model.Conversation
 import com.example.data.model.ConversationMessage
 import com.example.data.model.UserProfile
+import com.example.data.model.UsernameRegistration
 import com.example.util.OperationType
 import com.example.util.handleFirestoreError
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
+import com.google.firebase.storage.FirebaseStorage
+import android.util.Log
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
+import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
@@ -38,7 +42,72 @@ class ChatRepository(private val db: FirebaseFirestore) {
 
     private fun requireUserId(): String {
         return auth.currentUser?.uid
-            ?: throw IllegalStateException("User must be signed in with Google before accessing Firestore.")
+            ?: throw IllegalStateException("User must be signed in before accessing Firestore.")
+    }
+
+    // --- USERNAME REGISTRATION & AVAILABILITY ---
+
+    suspend fun checkUsernameAvailable(rawUsername: String): Result<Boolean> = withContext(Dispatchers.IO) {
+        val clean = rawUsername.trim().lowercase().removePrefix("@")
+        if (!clean.matches(Regex("^[a-z0-9_]{3,30}$"))) {
+            return@withContext Result.success(false)
+        }
+        try {
+            val doc = db.collection("usernames").document(clean).get().await()
+            Result.success(!doc.exists())
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.GET, "usernames/$clean")
+            Result.failure(e)
+        }
+    }
+
+    suspend fun claimUsername(rawUsername: String, userId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val clean = rawUsername.trim().lowercase().removePrefix("@")
+        if (!clean.matches(Regex("^[a-z0-9_]{3,30}$"))) {
+            return@withContext Result.failure(
+                IllegalArgumentException("Username must be 3-30 characters (letters, numbers, underscores only)")
+            )
+        }
+        try {
+            val batch = db.batch()
+            val usernameRef = db.collection("usernames").document(clean)
+            val userRef = db.collection("users").document(userId)
+
+            batch.set(usernameRef, UsernameRegistration(username = clean, userId = userId).toMap())
+            batch.set(
+                userRef,
+                mapOf(
+                    "username" to clean,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                ),
+                SetOptions.merge()
+            )
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, "usernames/$clean")
+            Result.failure(e)
+        }
+    }
+
+    suspend fun searchUserByUsername(rawUsername: String): Result<UserProfile?> = withContext(Dispatchers.IO) {
+        val clean = rawUsername.trim().lowercase().removePrefix("@")
+        if (!clean.matches(Regex("^[a-z0-9_]{3,30}$"))) {
+            return@withContext Result.success(null)
+        }
+        try {
+            val usernameDoc = db.collection("usernames").document(clean).get().await()
+            if (!usernameDoc.exists()) {
+                return@withContext Result.success(null)
+            }
+            val targetUid = usernameDoc.getString("userId") ?: return@withContext Result.success(null)
+            val userDoc = db.collection("users").document(targetUid).get().await()
+            val profile = userDoc.toObject(UserProfile::class.java)
+            Result.success(profile)
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.GET, "usernames/$clean")
+            Result.failure(e)
+        }
     }
 
     // --- USER PROFILES ---
@@ -60,20 +129,14 @@ class ChatRepository(private val db: FirebaseFirestore) {
         )
     }
 
-    fun observeAllUsers(): Flow<List<UserProfile>> = flow {
-        val path = "users"
-        emitAll(
-            db.collection("users")
-                .limit(50)
-                .snapshots()
-                .map { snapshot ->
-                    snapshot.toObjects(UserProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                }
-                .catch { error ->
-                    if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                    throw error
-                }
-        )
+    suspend fun getUserProfile(userId: String): Result<UserProfile?> = withContext(Dispatchers.IO) {
+        try {
+            val doc = db.collection("users").document(userId).get().await()
+            Result.success(doc.toObject(UserProfile::class.java))
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.GET, "users/$userId")
+            Result.failure(e)
+        }
     }
 
     suspend fun saveUserProfile(profile: UserProfile): Result<Unit> = withContext(Dispatchers.IO) {
@@ -94,15 +157,29 @@ class ChatRepository(private val db: FirebaseFirestore) {
         }
     }
 
-    // --- CHANNELS ---
+    suspend fun uploadProfilePicture(userId: String, imageBytes: ByteArray): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            val storageRef = FirebaseStorage.getInstance().reference.child("profile_pictures/$userId.jpg")
+            storageRef.putBytes(imageBytes).await()
+            val downloadUrl = storageRef.downloadUrl.await().toString()
+            Result.success(downloadUrl)
+        } catch (e: Exception) {
+            Log.w("ChatRepository", "Firebase Storage upload failed: ${e.message}")
+            Result.failure(e)
+        }
+    }
 
-    fun observeChannels(): Flow<List<Channel>> = flow {
-        val path = "channels"
+    // --- CONNECTION REQUESTS (PRIVACY-COMPLIANT) ---
+
+    fun observeIncomingRequests(userId: String): Flow<List<ConnectionRequest>> = flow {
+        val path = "connection_requests"
         emitAll(
-            db.collection("channels")
+            db.collection("connection_requests")
+                .whereEqualTo("toUserId", userId)
+                .whereEqualTo("status", "PENDING")
                 .snapshots()
                 .map { snapshot ->
-                    snapshot.toObjects(Channel::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    snapshot.toObjects(ConnectionRequest::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                 }
                 .catch { error ->
                     if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
@@ -111,103 +188,108 @@ class ChatRepository(private val db: FirebaseFirestore) {
         )
     }
 
-    suspend fun createChannel(name: String, description: String): Result<String> = withContext(Dispatchers.IO) {
-        val channelId = "ch_${UUID.randomUUID().toString().replace("-", "").take(12)}"
-        val path = "channels/$channelId"
+    fun observeOutgoingRequests(userId: String): Flow<List<ConnectionRequest>> = flow {
+        val path = "connection_requests"
+        emitAll(
+            db.collection("connection_requests")
+                .whereEqualTo("fromUserId", userId)
+                .snapshots()
+                .map { snapshot ->
+                    snapshot.toObjects(ConnectionRequest::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                }
+                .catch { error ->
+                    if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
+                    throw error
+                }
+        )
+    }
+
+    fun observeAcceptedConnections(userId: String): Flow<List<ConnectionRequest>> {
+        val incomingAccepted = db.collection("connection_requests")
+            .whereEqualTo("toUserId", userId)
+            .whereEqualTo("status", "ACCEPTED")
+            .snapshots()
+            .map { it.toObjects(ConnectionRequest::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
+
+        val outgoingAccepted = db.collection("connection_requests")
+            .whereEqualTo("fromUserId", userId)
+            .whereEqualTo("status", "ACCEPTED")
+            .snapshots()
+            .map { it.toObjects(ConnectionRequest::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
+
+        return incomingAccepted.combine(outgoingAccepted) { inc, out ->
+            (inc + out).distinctBy { it.requestId }
+        }.catch { error ->
+            if (error is Exception) handleFirestoreError(error, OperationType.LIST, "connection_requests")
+            throw error
+        }
+    }
+
+    suspend fun sendConnectionRequest(
+        toUserId: String,
+        toUserName: String
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val requestId = "req_${UUID.randomUUID().toString().replace("-", "").take(14)}"
+        val path = "connection_requests/$requestId"
         try {
             val uid = requireUserId()
-            val channel = Channel(
-                channelId = channelId,
-                name = name.trim(),
-                description = description.trim(),
-                createdBy = uid,
-                memberCount = 1
+            val myProfile = db.collection("users").document(uid).get().await()
+                .toObject(UserProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            val myName = myProfile?.displayName ?: "PulseChat User"
+            val myPhoto = myProfile?.photoUrl
+
+            val request = ConnectionRequest(
+                requestId = requestId,
+                fromUserId = uid,
+                fromUserName = myName,
+                fromUserPhotoUrl = myPhoto,
+                toUserId = toUserId,
+                toUserName = toUserName,
+                status = "PENDING"
             )
-            db.collection("channels").document(channelId).set(channel.toCreateMap()).await()
-            Result.success(channelId)
+            db.collection("connection_requests").document(requestId).set(request.toCreateMap()).await()
+            Result.success(requestId)
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, path)
             Result.failure(e)
         }
     }
 
-    suspend fun ensureDefaultChannelsExist(): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun acceptConnectionRequest(requestId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val path = "connection_requests/$requestId"
         try {
-            val uid = requireUserId()
-            val defaults = listOf(
-                Pair("general", "General conversations and team pulse"),
-                Pair("tech-talk", "Development, Kotlin, Compose, architecture"),
-                Pair("casual-lounge", "Hangout, memes, coffee breaks, life"),
-                Pair("announcements", "Latest news, updates and milestones")
-            )
-            for ((slug, desc) in defaults) {
-                val docRef = db.collection("channels").document(slug)
-                val doc = docRef.get().await()
-                if (!doc.exists()) {
-                    val channel = Channel(
-                        channelId = slug,
-                        name = slug.replace("-", " ").replaceFirstChar { it.uppercase() },
-                        description = desc,
-                        createdBy = uid,
-                        memberCount = 1
-                    )
-                    docRef.set(channel.toCreateMap()).await()
-                }
-            }
+            requireUserId()
+            db.collection("connection_requests").document(requestId).update(
+                mapOf(
+                    "status" to "ACCEPTED",
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
             Result.success(Unit)
         } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.WRITE, "channels")
+            handleFirestoreError(e, OperationType.UPDATE, path)
             Result.failure(e)
         }
     }
 
-    fun observeChannelMessages(channelId: String): Flow<List<ChannelMessage>> = flow {
-        val path = "channels/$channelId/messages"
-        emitAll(
-            db.collection("channels").document(channelId).collection("messages")
-                .orderBy("createdAt", Query.Direction.ASCENDING)
-                .limit(100)
-                .snapshots()
-                .map { snapshot ->
-                    snapshot.toObjects(ChannelMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                }
-                .catch { error ->
-                    if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                    throw error
-                }
-        )
-    }
-
-    suspend fun sendChannelMessage(
-        channelId: String,
-        senderName: String,
-        senderPhotoUrl: String?,
-        text: String
-    ): Result<String> = withContext(Dispatchers.IO) {
-        val messageId = "msg_${UUID.randomUUID().toString().replace("-", "").take(14)}"
-        val path = "channels/$channelId/messages/$messageId"
+    suspend fun declineConnectionRequest(requestId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val path = "connection_requests/$requestId"
         try {
-            val uid = requireUserId()
-            val message = ChannelMessage(
-                messageId = messageId,
-                channelId = channelId,
-                senderId = uid,
-                senderName = senderName,
-                senderPhotoUrl = senderPhotoUrl,
-                text = text.trim()
-            )
-            db.collection("channels").document(channelId).collection("messages")
-                .document(messageId)
-                .set(message.toCreateMap())
-                .await()
-            Result.success(messageId)
+            requireUserId()
+            db.collection("connection_requests").document(requestId).update(
+                mapOf(
+                    "status" to "DECLINED",
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
         } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.CREATE, path)
+            handleFirestoreError(e, OperationType.UPDATE, path)
             Result.failure(e)
         }
     }
 
-    // --- DIRECT CONVERSATIONS ---
+    // --- DIRECT 1-ON-1 CONVERSATIONS (TOTAL CHAT PRIVACY) ---
 
     fun observeConversations(userId: String): Flow<List<Conversation>> = flow {
         val path = "conversations"
@@ -268,6 +350,7 @@ class ChatRepository(private val db: FirebaseFirestore) {
     suspend fun sendConversationMessage(
         conversationId: String,
         senderName: String,
+        senderPhotoUrl: String? = null,
         text: String,
         participantUids: List<String>
     ): Result<String> = withContext(Dispatchers.IO) {
@@ -280,6 +363,7 @@ class ChatRepository(private val db: FirebaseFirestore) {
                 conversationId = conversationId,
                 senderId = uid,
                 senderName = senderName,
+                senderPhotoUrl = senderPhotoUrl,
                 text = text.trim(),
                 participantUids = participantUids
             )

@@ -17,13 +17,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.example.data.repository.ChatRepository
 import com.example.ui.AuthScreen
 import com.example.ui.ChatViewModel
+import com.example.ui.ClaimUsernameScreen
+import com.example.ui.IndividualDirectChatScreen
 import com.example.ui.MainChatScreen
+import com.example.ui.ProfileScreen
+import com.example.ui.UserDiscoveryScreen
+import com.example.ui.navigation.Screen
 import com.example.ui.signOutUser
 import com.example.ui.theme.MyApplicationTheme
 import com.google.firebase.Firebase
@@ -66,14 +77,14 @@ fun AppNavigation() {
 
     val user = currentUser
     if (user == null) {
-        // Unauthenticated session: Render Google Sign-In Screen
+        // Unauthenticated: Login & Registration screen with real-time unique username checking
         AuthScreen(
             onAuthSuccess = {
                 currentUser = Firebase.auth.currentUser
             }
         )
     } else {
-        // Authenticated session: Feature ViewModels are keyed by user.uid
+        // Authenticated session: Feature ViewModel keyed by user.uid
         val chatViewModel: ChatViewModel = viewModel(
             key = user.uid,
             factory = viewModelFactory {
@@ -86,17 +97,107 @@ fun AppNavigation() {
             }
         )
 
-        MainChatScreen(
-            viewModel = chatViewModel,
-            onSignOutRequested = {
-                signOutUser(
-                    context = context,
-                    onSignOutComplete = {
-                        currentUser = null
-                    },
-                    scope = coroutineScope
-                )
+        val profile by chatViewModel.userProfile.collectAsStateWithLifecycle()
+
+        // If user is authenticated but has not yet claimed a unique username (e.g. Google Sign-In)
+        if (profile != null && profile?.username.isNullOrBlank()) {
+            ClaimUsernameScreen(
+                viewModel = chatViewModel,
+                onSignOutRequested = {
+                    signOutUser(
+                        context = context,
+                        onSignOutComplete = {
+                            currentUser = null
+                        },
+                        scope = coroutineScope
+                    )
+                }
+            )
+        } else {
+            // Main Navigation
+            val navController = rememberNavController()
+
+            NavHost(
+                navController = navController,
+                startDestination = Screen.Dashboard.route
+            ) {
+                // Dashboard: Active Chats & Connections
+                composable(Screen.Dashboard.route) {
+                    MainChatScreen(
+                        viewModel = chatViewModel,
+                        onNavigateToProfile = {
+                            navController.navigate(Screen.Profile.route)
+                        },
+                        onNavigateToDiscovery = {
+                            navController.navigate(Screen.Discovery.route)
+                        },
+                        onNavigateToDirectChat = { convId, otherUid ->
+                            navController.navigate(Screen.DirectChat.createRoute(convId, otherUid))
+                        },
+                        onSignOutRequested = {
+                            signOutUser(
+                                context = context,
+                                onSignOutComplete = {
+                                    currentUser = null
+                                },
+                                scope = coroutineScope
+                            )
+                        }
+                    )
+                }
+
+                // Profile Settings Screen
+                composable(Screen.Profile.route) {
+                    ProfileScreen(
+                        viewModel = chatViewModel,
+                        onNavigateBack = {
+                            navController.popBackStack()
+                        },
+                        onSignOutRequested = {
+                            signOutUser(
+                                context = context,
+                                onSignOutComplete = {
+                                    currentUser = null
+                                },
+                                scope = coroutineScope
+                            )
+                        }
+                    )
+                }
+
+                // Username Search Screen (Strict Privacy)
+                composable(Screen.Discovery.route) {
+                    UserDiscoveryScreen(
+                        viewModel = chatViewModel,
+                        onNavigateBack = {
+                            navController.popBackStack()
+                        },
+                        onNavigateToDirectChat = { convId, otherUid ->
+                            navController.navigate(Screen.DirectChat.createRoute(convId, otherUid))
+                        }
+                    )
+                }
+
+                // Individual 1-on-1 Direct Chat Screen (Strict Chat Privacy)
+                composable(
+                    route = Screen.DirectChat.route,
+                    arguments = listOf(
+                        navArgument("conversationId") { type = NavType.StringType },
+                        navArgument("otherUserId") { type = NavType.StringType }
+                    )
+                ) { backStackEntry ->
+                    val conversationId = backStackEntry.arguments?.getString("conversationId") ?: ""
+                    val otherUserId = backStackEntry.arguments?.getString("otherUserId") ?: ""
+                    IndividualDirectChatScreen(
+                        conversationId = conversationId,
+                        otherUserId = otherUserId,
+                        viewModel = chatViewModel,
+                        onNavigateBack = {
+                            navController.popBackStack()
+                        }
+                    )
+                }
             }
-        )
+        }
     }
 }

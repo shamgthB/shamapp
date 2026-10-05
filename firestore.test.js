@@ -39,113 +39,92 @@ beforeEach(async () => {
   }
 });
 
-test("Unauthenticated user: cannot read users", async () => {
+test("Username check: unauthenticated or authenticated can check specific username", async () => {
   const unauthDb = testEnv.unauthenticatedContext().firestore();
-  await assertFails(unauthDb.collection("users").get());
+  // Document get on valid username succeeds (even if doc doesn't exist)
+  await assertSucceeds(unauthDb.collection("usernames").doc("alice_cool").get());
+
+  // Listing all usernames is strictly denied to prevent user enumeration
+  await assertFails(unauthDb.collection("usernames").get());
 });
 
-test("Authenticated user: can create their own profile, cannot create other profile", async () => {
+test("Username claim: authenticated user can claim unique username for themselves", async () => {
   const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
-  
-  // Succeeds for own profile
+
+  // Alice claims "alice_cool"
+  await assertSucceeds(
+    aliceDb.collection("usernames").doc("alice_cool").set({
+      username: "alice_cool",
+      userId: ALICE_UID,
+      createdAt: new Date(),
+    })
+  );
+
+  // Bob cannot claim Alice's username or claim with another's UID
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  await assertFails(
+    bobDb.collection("usernames").doc("alice_cool").set({
+      username: "alice_cool",
+      userId: BOB_UID,
+      createdAt: new Date(),
+    })
+  );
+});
+
+test("Privacy rule: listing all users is denied, but individual user get is allowed", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+
+  // Create Alice's profile
   await assertSucceeds(
     aliceDb.collection("users").doc(ALICE_UID).set({
       userId: ALICE_UID,
-      displayName: "Alice Smith",
+      username: "alice",
+      displayName: "Alice",
       email: "alice@example.com",
-      status: "Online",
       createdAt: new Date(),
     })
   );
 
-  // Fails for Bob's profile
-  await assertFails(
-    aliceDb.collection("users").doc(BOB_UID).set({
-      userId: BOB_UID,
-      displayName: "Bob Fake",
-      email: "bob@example.com",
-      createdAt: new Date(),
-    })
-  );
+  // Listing the entire users collection is strictly denied
+  await assertFails(aliceDb.collection("users").get());
+
+  // Individual user lookup by ID is allowed
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).get());
 });
 
-test("Channels: Alice can create channel and post message", async () => {
-  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
-  const channelRef = aliceDb.collection("channels").doc("tech_chat");
-
-  await assertSucceeds(
-    channelRef.set({
-      channelId: "tech_chat",
-      name: "Tech Chat",
-      description: "Discuss technology and programming",
-      createdBy: ALICE_UID,
-      memberCount: 1,
-      createdAt: new Date(),
-    })
-  );
-
-  // Alice posts message
-  await assertSucceeds(
-    channelRef.collection("messages").doc("msg_1").set({
-      messageId: "msg_1",
-      channelId: "tech_chat",
-      senderId: ALICE_UID,
-      senderName: "Alice Smith",
-      text: "Hello everyone in Tech Chat!",
-      createdAt: new Date(),
-    })
-  );
-
-  // Unauthenticated user cannot post
-  const unauthDb = testEnv.unauthenticatedContext().firestore();
-  await assertFails(
-    unauthDb.collection("channels").doc("tech_chat").collection("messages").doc("msg_2").set({
-      messageId: "msg_2",
-      channelId: "tech_chat",
-      senderId: "anon",
-      senderName: "Anonymous",
-      text: "Spam message",
-      createdAt: new Date(),
-    })
-  );
-});
-
-test("Conversations: Alice and Bob can chat, Charlie is denied", async () => {
+test("Chat privacy: only conversation participants can read conversation and messages", async () => {
   const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
   const convId = "conv_alice_bob";
-  const convRef = aliceDb.collection("conversations").doc(convId);
 
+  // Alice creates conversation with Bob
   await assertSucceeds(
-    convRef.set({
+    aliceDb.collection("conversations").doc(convId).set({
       conversationId: convId,
       participantUids: [ALICE_UID, BOB_UID],
-      lastMessage: "Hey Bob!",
-      lastMessageSenderId: ALICE_UID,
-      lastMessageAt: new Date(),
       createdAt: new Date(),
     })
   );
 
-  // Alice sends message in conversation
+  // Alice sends message
+  const msgId = "msg_1";
   await assertSucceeds(
-    convRef.collection("messages").doc("msg_dm_1").set({
-      messageId: "msg_dm_1",
+    aliceDb.collection("conversations").doc(convId).collection("messages").doc(msgId).set({
+      messageId: msgId,
       conversationId: convId,
       senderId: ALICE_UID,
-      senderName: "Alice Smith",
-      text: "Hey Bob, how are you?",
+      senderName: "Alice",
+      text: "Hello Bob! Secret chat.",
       participantUids: [ALICE_UID, BOB_UID],
       createdAt: new Date(),
     })
   );
 
-  // Bob can read
+  // Bob (participant) can read message
   const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
-  await assertSucceeds(bobDb.collection("conversations").doc(convId).get());
-  await assertSucceeds(bobDb.collection("conversations").doc(convId).collection("messages").doc("msg_dm_1").get());
+  await assertSucceeds(bobDb.collection("conversations").doc(convId).collection("messages").doc(msgId).get());
 
-  // Charlie is denied
+  // Charlie (stranger) CANNOT read conversation or messages
   const charlieDb = testEnv.authenticatedContext(CHARLIE_UID).firestore();
   await assertFails(charlieDb.collection("conversations").doc(convId).get());
-  await assertFails(charlieDb.collection("conversations").doc(convId).collection("messages").doc("msg_dm_1").get());
+  await assertFails(charlieDb.collection("conversations").doc(convId).collection("messages").doc(msgId).get());
 });

@@ -1,5 +1,26 @@
 {
   "entities": {
+    "Username": {
+      "title": "Username",
+      "description": "Unique username registry mapped to user ID",
+      "type": "object",
+      "properties": {
+        "username": {
+          "type": "string",
+          "description": "Lowercased unique username (3-30 alphanumeric and underscore characters)"
+        },
+        "userId": {
+          "type": "string",
+          "description": "UID of the registered owner"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when username was registered; client submits FieldValue.serverTimestamp()"
+        }
+      },
+      "required": ["username", "userId", "createdAt"]
+    },
     "UserProfile": {
       "title": "UserProfile",
       "description": "Public profile details for a registered user",
@@ -7,7 +28,11 @@
       "properties": {
         "userId": {
           "type": "string",
-          "description": "Unique Google user ID"
+          "description": "Unique Firebase Auth user ID"
+        },
+        "username": {
+          "type": "string",
+          "description": "Unique username handle (lowercased)"
         },
         "displayName": {
           "type": "string",
@@ -19,11 +44,11 @@
         },
         "photoUrl": {
           "type": "string",
-          "description": "Optional profile avatar URL"
+          "description": "Optional profile avatar URL or base64 data URI"
         },
         "status": {
           "type": "string",
-          "description": "Presence status e.g. Online, Away, Busy"
+          "description": "Presence status e.g. Online, Away, Busy, Offline"
         },
         "about": {
           "type": "string",
@@ -42,88 +67,65 @@
       },
       "required": ["userId", "displayName", "email", "createdAt"]
     },
-    "Channel": {
-      "title": "Channel",
-      "description": "Public group chat channel",
+    "ConnectionRequest": {
+      "title": "ConnectionRequest",
+      "description": "Connection or chat request between two users searched by username",
       "type": "object",
       "properties": {
-        "channelId": {
+        "requestId": {
           "type": "string",
-          "description": "Unique channel identifier"
+          "description": "Unique request identifier"
         },
-        "name": {
+        "fromUserId": {
           "type": "string",
-          "description": "Channel name slug"
+          "description": "Sender user ID"
         },
-        "description": {
+        "fromUserName": {
           "type": "string",
-          "description": "Description of the channel's topic"
+          "description": "Sender display name"
         },
-        "createdBy": {
+        "fromUserPhotoUrl": {
           "type": "string",
-          "description": "User ID who created the channel"
+          "description": "Sender profile photo URL"
+        },
+        "toUserId": {
+          "type": "string",
+          "description": "Recipient user ID"
+        },
+        "toUserName": {
+          "type": "string",
+          "description": "Recipient display name"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["PENDING", "ACCEPTED", "DECLINED"],
+          "description": "Request status"
         },
         "createdAt": {
           "type": "string",
           "format": "date-time",
-          "description": "Channel creation timestamp; client submits FieldValue.serverTimestamp()"
+          "description": "Creation timestamp; client submits FieldValue.serverTimestamp()"
         },
-        "memberCount": {
-          "type": "integer",
-          "description": "Estimated member count"
-        }
-      },
-      "required": ["channelId", "name", "description", "createdBy", "createdAt"]
-    },
-    "ChannelMessage": {
-      "title": "ChannelMessage",
-      "description": "Message posted inside a channel",
-      "type": "object",
-      "properties": {
-        "messageId": {
-          "type": "string",
-          "description": "Unique message ID"
-        },
-        "channelId": {
-          "type": "string",
-          "description": "Parent channel ID"
-        },
-        "senderId": {
-          "type": "string",
-          "description": "Author UID matching request.auth.uid"
-        },
-        "senderName": {
-          "type": "string",
-          "description": "Author display name"
-        },
-        "senderPhotoUrl": {
-          "type": "string",
-          "description": "Optional author photo URL"
-        },
-        "text": {
-          "type": "string",
-          "description": "Message content"
-        },
-        "createdAt": {
+        "updatedAt": {
           "type": "string",
           "format": "date-time",
-          "description": "Message sent timestamp; client submits FieldValue.serverTimestamp()"
+          "description": "Last update timestamp; client submits FieldValue.serverTimestamp()"
         }
       },
-      "required": ["messageId", "channelId", "senderId", "senderName", "text", "createdAt"]
+      "required": ["requestId", "fromUserId", "fromUserName", "toUserId", "toUserName", "status", "createdAt"]
     },
     "Conversation": {
       "title": "Conversation",
-      "description": "Direct 1-on-1 message thread between two users",
+      "description": "Direct private 1-on-1 message thread strictly between two users",
       "type": "object",
       "properties": {
         "conversationId": {
           "type": "string",
-          "description": "Unique thread ID"
+          "description": "Unique thread ID (deterministic conv_uid1_uid2)"
         },
         "participantUids": {
           "type": "array",
-          "description": "List of the two participant UIDs"
+          "description": "List containing exactly the two participant UIDs"
         },
         "lastMessage": {
           "type": "string",
@@ -148,7 +150,7 @@
     },
     "ConversationMessage": {
       "title": "ConversationMessage",
-      "description": "Individual direct message in a conversation",
+      "description": "Private direct message in a conversation",
       "type": "object",
       "properties": {
         "messageId": {
@@ -185,17 +187,17 @@
     }
   },
   "firestore": {
+    "/usernames/{username}": {
+      "schema": "Username",
+      "description": "Global unique username registry"
+    },
     "/users/{userId}": {
       "schema": "UserProfile",
-      "description": "User profile directory"
+      "description": "User profile directory (get by ID only; listing forbidden)"
     },
-    "/channels/{channelId}": {
-      "schema": "Channel",
-      "description": "Public chat channels"
-    },
-    "/channels/{channelId}/messages/{messageId}": {
-      "schema": "ChannelMessage",
-      "description": "Messages inside a channel"
+    "/connection_requests/{requestId}": {
+      "schema": "ConnectionRequest",
+      "description": "Friend and connection requests"
     },
     "/conversations/{conversationId}": {
       "schema": "Conversation",
